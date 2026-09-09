@@ -1,0 +1,13 @@
+[package]
+name = "simple_service_manager"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bincode = "2.0.1"
+clap = "4.6.6"
+crossterm = "0.29.0"
+ratatui = "0.30.2"
+serde = { version = "1.0.229", features = ["derive"] }
+shared_child = "1.1.2"
+uuid = { version = "1.26.0", features = ["v4"] }

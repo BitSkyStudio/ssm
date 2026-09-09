@@ -1,21 +1,32 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
-use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const SOCKET_PATH: &Path = Path::new("~/.ssm.sock");
+static SOCKET_PATH: OnceLock<PathBuf> = OnceLock::new();
+pub fn socket_path() -> &'static Path {
+    SOCKET_PATH
+        .get_or_init(|| {
+            let mut path = home::home_dir().unwrap();
+            path.push(".ssm.sock");
+            path
+        })
+        .as_path()
+}
 
+#[derive(Clone, Serialize, Deserialize)]
 pub enum NetMessageS2C {
-    UpdateServiceConfig(ServiceConfig),
+    UpdateServiceConfig { id: Uuid, config: ServiceConfig },
     UpdateServiceStatus { id: Uuid, status: ServiceStatus },
     RemoveService(Uuid),
     ClearLogs,
     AddLog(LogEntry),
 }
+#[derive(Serialize, Deserialize)]
 pub enum NetMessageC2S {
     StartService(Uuid),
     StopService(Uuid),
@@ -24,14 +35,13 @@ pub enum NetMessageC2S {
     UnpauseService(Uuid),
     MonitorLog(Uuid),
     CancelMonitorLog,
-    UpdateServiceConfig(ServiceConfig),
+    UpdateServiceConfig { id: Uuid, config: ServiceConfig },
     RemoveService(Uuid),
     SendIn(String),
 }
 
-#[derive(Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ServiceConfig {
-    pub id: Uuid,
     pub name: String,
     pub executable: PathBuf,
     pub working_directory: PathBuf,
@@ -39,7 +49,7 @@ pub struct ServiceConfig {
     pub environment: HashMap<String, String>,
     pub autostart: bool,
 }
-#[derive(Copy, Clone, Serialize, Deserialize, Encode, Decode)]
+#[derive(Copy, Clone, Serialize, Deserialize)]
 pub enum ServiceStatus {
     Down,
     Running,
@@ -48,7 +58,7 @@ pub enum ServiceStatus {
     Miscarried,
     Paused,
 }
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum LogEntry {
     Out(String),
     Err(String),

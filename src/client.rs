@@ -1,5 +1,7 @@
-use crate::lib::SOCKET_PATH;
+use std::os::unix::net::UnixStream;
 
-fn run_client() {
-    let stream = UnixStream::connect(SOCKET_PATH).unwrap();
+use crate::common::socket_path;
+
+pub fn run_client() {
+    let stream = UnixStream::connect(socket_path()).unwrap();
 }

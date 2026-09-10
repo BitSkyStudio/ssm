@@ -1,8 +1,7 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, hash_map::Entry},
     io::{self, BufRead, BufReader, Write},
     os::unix::net::{UnixListener, UnixStream},
-    path::PathBuf,
     process::{ChildStdin, Command, ExitStatus, Stdio},
     sync::{
         Arc,
@@ -73,24 +72,6 @@ pub fn run_server() {
             }
         }
     };
-    {
-        let id = Uuid::new_v4();
-        services.insert(
-            id,
-            Service::from_config(
-                id,
-                ServiceConfig {
-                    name: "repeat".to_string(),
-                    executable: PathBuf::from("/usr/bin/cat"),
-                    working_directory: PathBuf::from("/"),
-                    arguments: vec![],
-                    environment: HashMap::new(),
-                    auto_start: true,
-                    show_timestamp: true,
-                },
-            ),
-        );
-    }
     for service in services.values_mut() {
         if service.config.auto_start {
             service.try_start(tx.clone());
@@ -119,9 +100,9 @@ pub fn run_server() {
                         });
                         service.logs.push(log);
                     }
-                    ProcessMessage::Exit(code) => {
+                    ProcessMessage::Exit(_code) => {
                         service.process = None;
-                        service.status = if code.success() || service.stopping {
+                        service.status = if service.stopping {
                             ServiceStatus::Down
                         } else {
                             ServiceStatus::Dead
@@ -210,15 +191,19 @@ pub fn run_server() {
                     client.observing_log = None;
                 }
                 NetMessageC2S::UpdateServiceConfig { id, config } => {
-                    let Some(service) = services.get_mut(&id) else {
-                        continue;
-                    };
                     update_config_file(id, Some(&config));
-                    service.config = config;
                     broadcast!(NetMessageS2C::UpdateServiceConfig {
                         id,
-                        config: service.config.clone()
+                        config: config.clone()
                     });
+                    match services.entry(id) {
+                        Entry::Occupied(mut entry) => {
+                            entry.get_mut().config = config;
+                        }
+                        Entry::Vacant(entry) => {
+                            entry.insert(Service::from_config(id, config));
+                        }
+                    }
                 }
                 NetMessageC2S::RemoveService(id) => {
                     let Some(service) = services.get_mut(&id) else {

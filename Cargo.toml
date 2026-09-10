@@ -8,7 +8,7 @@ bincode = { version = "2.0.1", features = ["serde"] }
 clap = { version = "4.6.6", features = ["derive"] }
 crossterm = "0.29.0"
 home = "0.5.12"
-ratatui = "0.30.2"
+ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
 serde = { version = "1.0.229", features = ["derive"] }
 shared_child = "1.1.2"
 uuid = { version = "1.26.0", features = ["v4", "serde"] }

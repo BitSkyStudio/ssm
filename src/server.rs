@@ -2,11 +2,13 @@ use std::{
     collections::HashMap,
     io::{self, BufRead, BufReader, Write},
     os::unix::net::{UnixListener, UnixStream},
+    path::PathBuf,
     process::{ChildStdin, Command, ExitStatus, Stdio},
     sync::{
         Arc,
         mpsc::{Sender, channel},
     },
+    time::SystemTime,
 };
 
 use bincode::config::standard;
@@ -14,7 +16,7 @@ use shared_child::{SharedChild, unix::SharedChildExt};
 use uuid::Uuid;
 
 use crate::common::{
-    LogEntry, NetMessageC2S, NetMessageS2C, ServiceConfig, ServiceStatus, socket_path,
+    LogEntry, LogKind, NetMessageC2S, NetMessageS2C, ServiceConfig, ServiceStatus, socket_path,
 };
 
 type ServerTx = Sender<ServerMessage>;
@@ -27,6 +29,23 @@ pub fn run_server() {
     }
     let mut clients: HashMap<Uuid, ClientConnection> = HashMap::new();
     let mut services: HashMap<Uuid, Service> = HashMap::new();
+    {
+        let id = Uuid::new_v4();
+        services.insert(
+            id,
+            Service::from_config(
+                id,
+                ServiceConfig {
+                    name: "repeat".to_string(),
+                    executable: PathBuf::from("/usr/bin/cat"),
+                    working_directory: PathBuf::from("/"),
+                    arguments: vec![],
+                    environment: HashMap::new(),
+                    autostart: true,
+                },
+            ),
+        );
+    }
     for service in services.values_mut() {
         if service.config.autostart {
             service.try_start(tx.clone());
@@ -93,6 +112,11 @@ pub fn run_server() {
                     broadcast!(NetMessageS2C::UpdateServiceStatus {
                         id,
                         status: service.status
+                    });
+                    clients.values_mut().for_each(|client| {
+                        if client.observing_log == Some(service.id) {
+                            client.send(NetMessageS2C::ClearLogs);
+                        }
                     });
                 }
                 NetMessageC2S::StopService(id) => {
@@ -173,7 +197,11 @@ pub fn run_server() {
                         continue;
                     };
                     if let Some(process) = &mut service.process {
-                        let log = LogEntry::In(message.clone());
+                        let log = LogEntry {
+                            text: message.clone(),
+                            kind: LogKind::In,
+                            time: SystemTime::now(),
+                        };
                         clients.values_mut().for_each(|client| {
                             if client.observing_log == Some(service.id) {
                                 client.send(NetMessageS2C::AddLog(log.clone()));
@@ -228,6 +256,15 @@ struct Service {
     config: ServiceConfig,
 }
 impl Service {
+    pub fn from_config(id: Uuid, config: ServiceConfig) -> Service {
+        Service {
+            id,
+            process: None,
+            status: ServiceStatus::Down,
+            logs: Vec::new(),
+            config,
+        }
+    }
     pub fn try_start(&mut self, tx: ServerTx) {
         match self.status {
             ServiceStatus::Running | ServiceStatus::Stopping => return,
@@ -240,10 +277,11 @@ impl Service {
                 self.status = ServiceStatus::Running;
             }
             Err(error) => {
-                let mut message = String::new();
-                use std::fmt::Write;
-                let _ = write!(&mut message, "{:?}", error);
-                self.logs.push(LogEntry::Err(message));
+                self.logs.push(LogEntry {
+                    kind: LogKind::Err,
+                    text: format!("{:?}", error),
+                    time: SystemTime::now(),
+                });
                 self.status = ServiceStatus::Miscarried;
             }
         }
@@ -276,19 +314,27 @@ impl ServiceProcess {
                 let Ok(line) = line else { break };
                 let _ = tx2.send(ServerMessage::Process {
                     id,
-                    message: ProcessMessage::Log(LogEntry::Out(line)),
+                    message: ProcessMessage::Log(LogEntry {
+                        kind: LogKind::Out,
+                        text: line,
+                        time: SystemTime::now(),
+                    }),
                 });
             }
         });
         let stderr = child.take_stderr().unwrap();
         let tx2 = tx.clone();
         std::thread::spawn(move || {
-            let stdout = BufReader::new(stderr);
-            for line in stdout.lines() {
+            let stderr = BufReader::new(stderr);
+            for line in stderr.lines() {
                 let Ok(line) = line else { break };
                 let _ = tx2.send(ServerMessage::Process {
                     id,
-                    message: ProcessMessage::Log(LogEntry::Err(line)),
+                    message: ProcessMessage::Log(LogEntry {
+                        kind: LogKind::Err,
+                        text: line,
+                        time: SystemTime::now(),
+                    }),
                 });
             }
         });

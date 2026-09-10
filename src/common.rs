@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::OnceLock,
+    time::SystemTime,
 };
 
 use serde::{Deserialize, Serialize};
@@ -49,7 +50,7 @@ pub struct ServiceConfig {
     pub environment: HashMap<String, String>,
     pub autostart: bool,
 }
-#[derive(Copy, Clone, Serialize, Deserialize)]
+#[derive(Copy, Clone, Serialize, Deserialize, Debug)]
 pub enum ServiceStatus {
     Down,
     Running,
@@ -59,8 +60,14 @@ pub enum ServiceStatus {
     Paused,
 }
 #[derive(Clone, Serialize, Deserialize)]
-pub enum LogEntry {
-    Out(String),
-    Err(String),
-    In(String),
+pub struct LogEntry {
+    pub text: String,
+    pub kind: LogKind,
+    pub time: SystemTime,
+}
+#[derive(Copy, Clone, Serialize, Deserialize)]
+pub enum LogKind {
+    Out,
+    Err,
+    In,
 }

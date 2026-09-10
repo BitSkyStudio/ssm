@@ -12,3 +12,4 @@ ratatui = "0.30.2"
 serde = { version = "1.0.229", features = ["derive"] }
 shared_child = "1.1.2"
 uuid = { version = "1.26.0", features = ["v4", "serde"] }
+time = { version = "0.3", features = ["formatting", "macros", "local-offset"] }

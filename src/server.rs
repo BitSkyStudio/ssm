@@ -58,6 +58,7 @@ pub fn run_server() {
                     ProcessMessage::Exit(code) => {
                         service.process = None;
                         service.status = if code.success() {
+                            //todo: this probably fails on signals
                             ServiceStatus::Down
                         } else {
                             ServiceStatus::Dead

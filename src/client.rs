@@ -346,6 +346,9 @@ struct AppStateLogMonitor {
     logs: Vec<LogEntry>,
     input_box: TextArea<'static>,
     service: Uuid,
+    scroll: usize,
+    tracking: bool,
+    last_page_size: usize,
 }
 impl AppStateLogMonitor {
     pub fn new(service: Uuid) -> AppStateLogMonitor {
@@ -353,6 +356,9 @@ impl AppStateLogMonitor {
             logs: Vec::new(),
             input_box: TextArea::default(),
             service,
+            scroll: 0,
+            tracking: true,
+            last_page_size: 1,
         }
     }
 }
@@ -406,38 +412,81 @@ impl AppState for AppStateLogMonitor {
                 .title(format!("{} - {:?}", service.name, status))
                 .title_alignment(HorizontalAlignment::Center),
         );
-        //.scroll((*current_scroll as u16, 0));
         let chunks =
             Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(frame.area());
+        self.last_page_size = chunks[0].height as usize;
         let total_lines = paragraph.line_count(chunks[0].width);
-        let scroll = total_lines.saturating_sub(chunks[0].height as usize) as u16;
-        frame.render_widget(paragraph.scroll((scroll, 0)), chunks[0]);
+        let max_scroll = total_lines.saturating_sub(self.last_page_size);
+        self.scroll = self.scroll.min(max_scroll);
+        if self.tracking {
+            self.scroll = max_scroll;
+        }
+        if self.scroll == max_scroll {
+            self.tracking = true;
+        }
+        frame.render_widget(paragraph.scroll((self.scroll as u16, 0)), chunks[0]);
         frame.render_widget(&self.input_box, chunks[1]);
         false
     }
 
     fn handle_event(&mut self, app: &mut AppRef, event: &Event) {
-        if let Event::Key(key_event) = event {
-            if key_event.is_press() {
-                match key_event.code {
-                    KeyCode::Esc => {
-                        app.connection.send(NetMessageC2S::CancelMonitorLog);
-                        app.next_state = Some(AppStateKind::ServiceList(
-                            AppStateServiceList::new_at(self.service),
-                        ));
-                        return;
+        match event {
+            Event::Key(key_event) => {
+                if key_event.is_press() {
+                    match key_event.code {
+                        KeyCode::Esc => {
+                            app.connection.send(NetMessageC2S::CancelMonitorLog);
+                            app.next_state = Some(AppStateKind::ServiceList(
+                                AppStateServiceList::new_at(self.service),
+                            ));
+                            return;
+                        }
+                        KeyCode::Enter => {
+                            let mut text = self.input_box.lines().join("\n");
+                            text.push('\n');
+                            self.input_box.clear();
+                            app.connection.send(NetMessageC2S::SendIn(text));
+                            self.tracking = true;
+                            return;
+                        }
+                        KeyCode::Up => {
+                            self.scroll = self.scroll.saturating_sub(1);
+                            self.tracking = false;
+                        }
+                        KeyCode::PageUp => {
+                            self.scroll = self.scroll.saturating_sub(self.last_page_size);
+                            self.tracking = false;
+                        }
+                        KeyCode::Down => {
+                            self.scroll += 1;
+                        }
+                        KeyCode::PageDown => {
+                            self.scroll += self.last_page_size;
+                        }
+                        KeyCode::Home => {
+                            self.scroll = 0;
+                            self.tracking = false;
+                        }
+                        KeyCode::End => {
+                            self.tracking = true;
+                        }
+                        _ => {}
                     }
-                    KeyCode::Enter => {
-                        let mut text = self.input_box.lines().join("\n");
-                        text.push('\n');
-                        self.input_box.clear();
-                        app.connection.send(NetMessageC2S::SendIn(text));
-                        return;
-                    }
-                    _ => {}
                 }
             }
+            Event::Mouse(mouse_event) => match mouse_event.kind {
+                MouseEventKind::ScrollUp => {
+                    self.scroll = self.scroll.saturating_sub(1);
+                    self.tracking = false;
+                }
+                MouseEventKind::ScrollDown => {
+                    self.scroll += 1;
+                }
+                _ => {}
+            },
+            _ => (),
         }
+
         self.input_box.input(event.clone());
     }
 
@@ -513,7 +562,7 @@ impl AppStateUpdateConfig {
     }
 }
 impl AppState for AppStateUpdateConfig {
-    fn render(&mut self, app: &mut AppRef, frame: &mut Frame) -> bool {
+    fn render(&mut self, _app: &mut AppRef, frame: &mut Frame) -> bool {
         fn modifier_reverse_if<'a, T>(element: T, should: bool) -> T
         where
             T: Stylize<'a, T>,
@@ -556,7 +605,7 @@ impl AppState for AppStateUpdateConfig {
             "Arguments",
             self.cursor == CurrentlyEditing::Arguments,
         );
-        fn create_checkbox(name: &'static str, active: bool, state: bool) -> Text {
+        fn create_checkbox<'a>(name: &'a str, active: bool, state: bool) -> Text<'a> {
             let mut text = Text::default();
             text.push_span(modifier_reverse_if(Span::raw(name), active));
             text.push_span(Span::raw(if state { " [X]" } else { " [ ]" }));
@@ -642,6 +691,7 @@ impl AppState for AppStateUpdateConfig {
                                 fn read_field(field: &TextArea) -> String {
                                     field.lines().join("\n")
                                 }
+                                let arguments = read_field(&self.arguments_field);
                                 app.connection.send(NetMessageC2S::UpdateServiceConfig {
                                     id: self.id,
                                     config: ServiceConfig {
@@ -651,10 +701,14 @@ impl AppState for AppStateUpdateConfig {
                                             &self.working_directory_field,
                                         )
                                         .into(),
-                                        arguments: read_field(&self.arguments_field)
-                                            .split(" ")
-                                            .map(|str| str.to_string())
-                                            .collect(),
+                                        arguments: if arguments.is_empty() {
+                                            Vec::new()
+                                        } else {
+                                            arguments
+                                                .split(" ")
+                                                .map(|str| str.to_string())
+                                                .collect()
+                                        },
                                         environment: HashMap::new(),
                                         auto_start: self.auto_start,
                                         show_timestamp: self.show_timestamp,

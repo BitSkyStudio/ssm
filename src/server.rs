@@ -22,6 +22,12 @@ use crate::common::{
 type ServerTx = Sender<ServerMessage>;
 
 pub fn run_server() {
+    let service_save_directory = {
+        let mut path = home::home_dir().unwrap();
+        path.push(".ssm_services");
+        path
+    };
+    let _ = std::fs::create_dir(&service_save_directory);
     let (tx, rx) = channel();
     {
         let tx = tx.clone();
@@ -29,6 +35,44 @@ pub fn run_server() {
     }
     let mut clients: HashMap<Uuid, ClientConnection> = HashMap::new();
     let mut services: HashMap<Uuid, Service> = HashMap::new();
+    for entry in std::fs::read_dir(&service_save_directory).unwrap() {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let filename = entry.file_name();
+        let Some(file_name) = filename.to_str() else {
+            continue;
+        };
+        let Ok(id) = Uuid::parse_str(file_name) else {
+            continue;
+        };
+        let Ok(content) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        match toml::from_str::<ServiceConfig>(&content) {
+            Ok(config) => {
+                services.insert(id, Service::from_config(id, config));
+            }
+            Err(error) => {
+                eprintln!("error loading service {}: {:?}", id, error);
+            }
+        }
+    }
+    let update_config_file = |id: Uuid, config: Option<&ServiceConfig>| {
+        let mut service_path = service_save_directory.clone();
+        service_path.push(id.to_string());
+        match config {
+            Some(config) => {
+                let Ok(serialized) = toml::to_string_pretty(config) else {
+                    return;
+                };
+                let _ = std::fs::write(service_path, serialized);
+            }
+            None => {
+                let _ = std::fs::remove_file(service_path);
+            }
+        }
+    };
     {
         let id = Uuid::new_v4();
         services.insert(
@@ -41,13 +85,14 @@ pub fn run_server() {
                     working_directory: PathBuf::from("/"),
                     arguments: vec![],
                     environment: HashMap::new(),
-                    autostart: true,
+                    auto_start: true,
+                    show_timestamp: true,
                 },
             ),
         );
     }
     for service in services.values_mut() {
-        if service.config.autostart {
+        if service.config.auto_start {
             service.try_start(tx.clone());
         }
     }
@@ -76,8 +121,7 @@ pub fn run_server() {
                     }
                     ProcessMessage::Exit(code) => {
                         service.process = None;
-                        service.status = if code.success() {
-                            //todo: this probably fails on signals
+                        service.status = if code.success() || service.stopping {
                             ServiceStatus::Down
                         } else {
                             ServiceStatus::Dead
@@ -129,6 +173,7 @@ pub fn run_server() {
                     }
                     let _ = service.process.as_ref().unwrap().child.send_signal(15); //SIGTERM
                     service.status = ServiceStatus::Stopping;
+                    service.stopping = true;
                     broadcast!(NetMessageS2C::UpdateServiceStatus {
                         id,
                         status: service.status
@@ -142,6 +187,7 @@ pub fn run_server() {
                         ServiceStatus::Running | ServiceStatus::Stopping => {}
                         _ => continue,
                     }
+                    service.stopping = true;
                     let _ = service.process.as_ref().unwrap().child.kill();
                 }
                 NetMessageC2S::MonitorLog(id) => {
@@ -167,6 +213,7 @@ pub fn run_server() {
                     let Some(service) = services.get_mut(&id) else {
                         continue;
                     };
+                    update_config_file(id, Some(&config));
                     service.config = config;
                     broadcast!(NetMessageS2C::UpdateServiceConfig {
                         id,
@@ -183,6 +230,7 @@ pub fn run_server() {
                         }
                         _ => {}
                     }
+                    update_config_file(id, None);
                     services.remove(&id);
                     broadcast!(NetMessageS2C::RemoveService(id));
                 }
@@ -254,6 +302,7 @@ struct Service {
     status: ServiceStatus,
     logs: Vec<LogEntry>,
     config: ServiceConfig,
+    stopping: bool,
 }
 impl Service {
     pub fn from_config(id: Uuid, config: ServiceConfig) -> Service {
@@ -263,6 +312,7 @@ impl Service {
             status: ServiceStatus::Down,
             logs: Vec::new(),
             config,
+            stopping: false,
         }
     }
     pub fn try_start(&mut self, tx: ServerTx) {
@@ -270,6 +320,7 @@ impl Service {
             ServiceStatus::Running | ServiceStatus::Stopping => return,
             _ => {}
         }
+        self.stopping = false;
         self.logs.clear();
         match ServiceProcess::start(self.id, &self.config, tx) {
             Ok(process) => {

@@ -48,7 +48,8 @@ pub struct ServiceConfig {
     pub working_directory: PathBuf,
     pub arguments: Vec<String>,
     pub environment: HashMap<String, String>,
-    pub autostart: bool,
+    pub auto_start: bool,
+    pub show_timestamp: bool,
 }
 #[derive(Copy, Clone, Serialize, Deserialize, Debug)]
 pub enum ServiceStatus {

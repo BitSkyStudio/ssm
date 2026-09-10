@@ -5,19 +5,16 @@ use std::{
     process::exit,
     sync::mpsc::{Receiver, channel},
     thread,
-    time::Duration,
 };
 
 use bincode::config::standard;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, MouseEventKind};
+use crossterm::event::{self, Event, KeyCode, MouseEventKind};
 use ratatui::{
     DefaultTerminal, Frame,
-    buffer::Buffer,
-    layout::{HorizontalAlignment, Rect},
+    layout::{Constraint, HorizontalAlignment, Layout},
     style::{Color, Modifier},
-    symbols::border,
     text::{Line, Text},
-    widgets::{Block, List, ListItem, ListState, Paragraph, StatefulWidget, Widget},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 
 use ratatui::style::Stylize;
@@ -104,9 +101,13 @@ impl App {
     }
     fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         while !self.exit {
-            terminal.draw(|frame| {
-                self.with_app_ref(|state, app| state.render(app, frame));
-            })?;
+            while {
+                let mut repeat = false;
+                terminal.draw(|frame| {
+                    self.with_app_ref(|state, app| repeat |= state.render(app, frame));
+                })?;
+                repeat
+            } {}
 
             match self.rx.recv().unwrap() {
                 AppMessage::Net(message) => {
@@ -141,7 +142,7 @@ struct AppRef<'a> {
     exit: &'a mut bool,
 }
 trait AppState {
-    fn render(&mut self, app: &mut AppRef, frame: &mut Frame);
+    fn render(&mut self, app: &mut AppRef, frame: &mut Frame) -> bool;
     fn handle_event(&mut self, app: &mut AppRef, event: &Event);
     fn handle_message(&mut self, app: &mut AppRef, message: &NetMessageS2C);
 }
@@ -160,37 +161,26 @@ impl AppStateKind {
 struct AppStateServiceList {
     list_state: ListState,
     last_selected_service: Option<Uuid>,
+    next_select_service: Option<Uuid>,
 }
 impl AppStateServiceList {
     fn new() -> AppStateServiceList {
         AppStateServiceList {
             list_state: ListState::default().with_selected(Some(0)),
             last_selected_service: None,
+            next_select_service: None,
         }
     }
 }
 impl AppState for AppStateServiceList {
-    fn render(&mut self, app: &mut AppRef, frame: &mut Frame) {
-        let title = Line::from(" Counter App Tutorial ".bold());
-        let instructions = Line::from(vec![
-            " Decrement ".into(),
-            "<Left>".blue().bold(),
-            " Increment ".into(),
-            "<Right>".blue().bold(),
-            " Quit ".into(),
-            "<Q> ".blue().bold(),
-        ]);
-        let block = Block::bordered()
-            .title(title.centered())
-            .title_bottom(instructions.centered())
-            .border_set(border::THICK);
-
-        /*let counter_text = Text::from(vec![Line::from(vec![
-            "Value: ".into(),
-            0.to_string().yellow(),
-        ])]);*/
+    fn render(&mut self, app: &mut AppRef, frame: &mut Frame) -> bool {
         let mut service_list = app.services.keys().cloned().collect::<Vec<_>>();
         service_list.sort_by_key(|id| &app.services.get(id).unwrap().name);
+        if let Some(to_select) = self.next_select_service.take() {
+            if let Some(index) = service_list.iter().position(|s| *s == to_select) {
+                self.list_state.select(Some(index));
+            }
+        }
         let mut list = Vec::new();
         for id in &service_list {
             let service = app.services.get(id).unwrap();
@@ -205,17 +195,24 @@ impl AppState for AppStateServiceList {
             .highlight_style(Modifier::BOLD)
             .highlight_symbol("> ");
 
-        frame.render_stateful_widget(list, frame.area(), &mut self.list_state);
+        let chunks =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(2)]).split(frame.area());
+
+        frame.render_stateful_widget(list, chunks[0], &mut self.list_state);
+
+        frame.render_widget(
+            Paragraph::new(Text::raw(
+                "[S]Start [E]Stop [K]Kill [O]Pause [P]Continue [Enter]Monitor",
+            ))
+            .block(Block::default().borders(Borders::ALL.difference(Borders::BOTTOM))),
+            chunks[1],
+        );
 
         self.last_selected_service = match self.list_state.selected() {
             Some(selected) => service_list.get(selected).cloned(),
             None => None,
         };
-
-        /*Paragraph::new(counter_text)
-        .centered()
-        .block(block)
-        .render(area, buf);*/
+        false
     }
     fn handle_event(&mut self, app: &mut AppRef, event: &Event) {
         match event {
@@ -232,7 +229,7 @@ impl AppState for AppStateServiceList {
                             if let Some(id) = self.last_selected_service {
                                 app.connection.send(NetMessageC2S::MonitorLog(id));
                                 app.next_state =
-                                    Some(AppStateKind::LogMonitor(AppStateLogMonitor::new()));
+                                    Some(AppStateKind::LogMonitor(AppStateLogMonitor::new(id)));
                             }
                         }
                         KeyCode::Char('q') => {
@@ -298,25 +295,38 @@ impl AppState for AppStateServiceList {
 struct AppStateLogMonitor {
     logs: Vec<LogEntry>,
     input_box: TextArea<'static>,
+    service: Uuid,
 }
 impl AppStateLogMonitor {
-    pub fn new() -> AppStateLogMonitor {
+    pub fn new(service: Uuid) -> AppStateLogMonitor {
         AppStateLogMonitor {
             logs: Vec::new(),
             input_box: TextArea::default(),
+            service,
         }
     }
 }
 impl AppState for AppStateLogMonitor {
-    fn render(&mut self, app: &mut AppRef, frame: &mut Frame) {
+    fn render(&mut self, app: &mut AppRef, frame: &mut Frame) -> bool {
+        let Some(service) = app.services.get(&self.service) else {
+            app.next_state = Some(AppStateKind::ServiceList(AppStateServiceList::new()));
+            return true;
+        };
+
         let mut text = Text::default();
-        let format =
-            format_description::parse("[year]-[month]-[day] [hour]:[minute]:[second]").unwrap();
+        let format = format_description::parse_borrowed::<1>(
+            "[year]-[month]-[day] [hour]:[minute]:[second]",
+        )
+        .unwrap();
         for log in &self.logs {
             let datetime_utc: OffsetDateTime = log.time.into();
             let datetime_local = datetime_utc
                 .to_offset(time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC));
-            let time_formatted = format!("[{}]", datetime_local.format(&format).unwrap());
+            let time_formatted = if service.show_timestamp {
+                format!("[{}]", datetime_local.format(&format).unwrap())
+            } else {
+                String::new()
+            };
             let empty_padding: String = iter::repeat_n(' ', time_formatted.len()).collect();
             for (i, line) in log.text.lines().enumerate() {
                 let line = Line::from(format!(
@@ -326,7 +336,7 @@ impl AppState for AppStateLogMonitor {
                     } else {
                         &empty_padding
                     },
-                    log.text
+                    line
                 ));
                 text.push_line(match log.kind {
                     LogKind::Out => line.white(),
@@ -335,23 +345,23 @@ impl AppState for AppStateLogMonitor {
                 });
             }
         }
-        let mut frame_area = frame.area();
-        frame.render_widget(
-            text,
-            Rect {
-                height: frame_area.height - 1,
-                ..frame_area
-            },
+        let status = app
+            .statuses
+            .get(&self.service)
+            .cloned()
+            .unwrap_or(ServiceStatus::Down);
+        let paragraph = Paragraph::new(text.clone()).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!("{} - {:?}", service.name, status))
+                .title_alignment(HorizontalAlignment::Center),
         );
-        frame.render_widget(
-            &self.input_box,
-            Rect {
-                x: frame_area.x,
-                y: frame_area.y + frame_area.height - 1,
-                width: frame_area.width,
-                height: 1,
-            },
-        );
+        //.scroll((*current_scroll as u16, 0));
+        let chunks =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(frame.area());
+        frame.render_widget(paragraph, chunks[0]);
+        frame.render_widget(&self.input_box, chunks[1]);
+        false
     }
 
     fn handle_event(&mut self, app: &mut AppRef, event: &Event) {
@@ -361,8 +371,9 @@ impl AppState for AppStateLogMonitor {
                     match key_event.code {
                         KeyCode::Esc => {
                             app.connection.send(NetMessageC2S::CancelMonitorLog);
-                            app.next_state =
-                                Some(AppStateKind::ServiceList(AppStateServiceList::new()));
+                            let mut service_list = AppStateServiceList::new();
+                            service_list.next_select_service = Some(self.service);
+                            app.next_state = Some(AppStateKind::ServiceList(service_list));
                         }
                         KeyCode::Enter => {
                             let mut text = self.input_box.lines().join("\n");

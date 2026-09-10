@@ -108,31 +108,37 @@ impl App {
                 })?;
                 repeat
             } {}
-
-            match self.rx.recv().unwrap() {
-                AppMessage::Net(message) => {
-                    self.with_app_ref(|state, app| state.handle_message(app, &message));
-                    match message {
-                        NetMessageS2C::UpdateServiceConfig { id, config } => {
-                            self.services.insert(id, config);
+            let mut app_messages = Vec::new();
+            app_messages.push(self.rx.recv().unwrap());
+            while let Ok(message) = self.rx.try_recv() {
+                app_messages.push(message);
+            }
+            for app_message in app_messages {
+                match app_message {
+                    AppMessage::Net(message) => {
+                        self.with_app_ref(|state, app| state.handle_message(app, &message));
+                        match message {
+                            NetMessageS2C::UpdateServiceConfig { id, config } => {
+                                self.services.insert(id, config);
+                            }
+                            NetMessageS2C::UpdateServiceStatus { id, status } => {
+                                self.statuses.insert(id, status);
+                            }
+                            NetMessageS2C::RemoveService(id) => {
+                                self.services.remove(&id);
+                                self.statuses.remove(&id);
+                            }
+                            _ => {}
                         }
-                        NetMessageS2C::UpdateServiceStatus { id, status } => {
-                            self.statuses.insert(id, status);
-                        }
-                        NetMessageS2C::RemoveService(id) => {
-                            self.services.remove(&id);
-                            self.statuses.remove(&id);
-                        }
-                        _ => {}
                     }
-                }
-                AppMessage::TermEvent(event) => {
-                    self.with_app_ref(|state, app| state.handle_event(app, &event));
-                    if let Event::Key(key_event) = event {
-                        if key_event.code == KeyCode::Char('c')
-                            && key_event.modifiers.contains(KeyModifiers::CONTROL)
-                        {
-                            self.exit = true;
+                    AppMessage::TermEvent(event) => {
+                        self.with_app_ref(|state, app| state.handle_event(app, &event));
+                        if let Event::Key(key_event) = event {
+                            if key_event.code == KeyCode::Char('c')
+                                && key_event.modifiers.contains(KeyModifiers::CONTROL)
+                            {
+                                self.exit = true;
+                            }
                         }
                     }
                 }
@@ -523,12 +529,12 @@ enum CurrentlyEditing {
     ShowTimestamp,
     Save,
 }
-static EDIT_ORDER: [CurrentlyEditing; 8] = [
+static EDIT_ORDER: [CurrentlyEditing; 7] = [
     CurrentlyEditing::Name,
     CurrentlyEditing::Executable,
     CurrentlyEditing::WorkingDirectory,
     CurrentlyEditing::Arguments,
-    CurrentlyEditing::Environment,
+    //CurrentlyEditing::Environment,
     CurrentlyEditing::AutoStart,
     CurrentlyEditing::ShowTimestamp,
     CurrentlyEditing::Save,
@@ -643,88 +649,103 @@ impl AppState for AppStateUpdateConfig {
         );
         frame.render_widget(
             Paragraph::new(modifier_reverse_if(
-                Text::from("Save"),
+                Text::from("Commit"),
                 self.cursor == CurrentlyEditing::Save,
             ))
             .block(Block::bordered()),
-            chunks[6],
+            {
+                let mut area = chunks[6];
+                area.width = 8;
+                area
+            },
         );
 
         false
     }
     fn handle_event(&mut self, app: &mut AppRef, event: &Event) {
-        if let Event::Key(key_event) = event {
-            if key_event.is_press() {
-                match key_event.code {
-                    KeyCode::Tab | KeyCode::BackTab => {
-                        let mut current_index =
-                            EDIT_ORDER.iter().position(|e| *e == self.cursor).unwrap() as isize;
-                        match key_event.code {
-                            KeyCode::Tab => {
-                                current_index += 1;
-                            }
-                            KeyCode::BackTab => {
-                                current_index -= 1;
-                            }
-                            _ => unreachable!(),
+        let mut scroll_cursor = |scroll: isize| {
+            let mut current_index =
+                EDIT_ORDER.iter().position(|e| *e == self.cursor).unwrap() as isize;
+            current_index += scroll;
+            current_index += EDIT_ORDER.len() as isize;
+            current_index %= EDIT_ORDER.len() as isize;
+            self.cursor = EDIT_ORDER[current_index as usize];
+        };
+        match event {
+            Event::Key(key_event) => {
+                if key_event.is_press() {
+                    match key_event.code {
+                        KeyCode::Down => {
+                            scroll_cursor(1);
+                            return;
                         }
-                        current_index += EDIT_ORDER.len() as isize;
-                        current_index %= EDIT_ORDER.len() as isize;
-                        self.cursor = EDIT_ORDER[current_index as usize];
-                        return;
-                    }
-                    KeyCode::Esc => {
-                        app.next_state = Some(AppStateKind::ServiceList(
-                            AppStateServiceList::new_at(self.id),
-                        ));
-                        return;
-                    }
-                    KeyCode::Enter => {
-                        match self.cursor {
-                            CurrentlyEditing::AutoStart => {
-                                self.auto_start ^= true;
-                            }
-                            CurrentlyEditing::ShowTimestamp => {
-                                self.show_timestamp ^= true;
-                            }
-                            CurrentlyEditing::Save => {
-                                fn read_field(field: &TextArea) -> String {
-                                    field.lines().join("\n")
+                        KeyCode::Up => {
+                            scroll_cursor(-1);
+                            return;
+                        }
+                        KeyCode::Esc => {
+                            app.next_state = Some(AppStateKind::ServiceList(
+                                AppStateServiceList::new_at(self.id),
+                            ));
+                            return;
+                        }
+                        KeyCode::Enter => {
+                            match self.cursor {
+                                CurrentlyEditing::AutoStart => {
+                                    self.auto_start ^= true;
                                 }
-                                let arguments = read_field(&self.arguments_field);
-                                app.connection.send(NetMessageC2S::UpdateServiceConfig {
-                                    id: self.id,
-                                    config: ServiceConfig {
-                                        name: read_field(&self.name_field),
-                                        executable: read_field(&self.executable_field).into(),
-                                        working_directory: read_field(
-                                            &self.working_directory_field,
-                                        )
-                                        .into(),
-                                        arguments: if arguments.is_empty() {
-                                            Vec::new()
-                                        } else {
-                                            arguments
-                                                .split(" ")
-                                                .map(|str| str.to_string())
-                                                .collect()
+                                CurrentlyEditing::ShowTimestamp => {
+                                    self.show_timestamp ^= true;
+                                }
+                                CurrentlyEditing::Save => {
+                                    fn read_field(field: &TextArea) -> String {
+                                        field.lines().join("\n")
+                                    }
+                                    let arguments = read_field(&self.arguments_field);
+                                    app.connection.send(NetMessageC2S::UpdateServiceConfig {
+                                        id: self.id,
+                                        config: ServiceConfig {
+                                            name: read_field(&self.name_field),
+                                            executable: read_field(&self.executable_field).into(),
+                                            working_directory: read_field(
+                                                &self.working_directory_field,
+                                            )
+                                            .into(),
+                                            arguments: if arguments.is_empty() {
+                                                Vec::new()
+                                            } else {
+                                                arguments
+                                                    .split(" ")
+                                                    .map(|str| str.to_string())
+                                                    .collect()
+                                            },
+                                            environment: HashMap::new(),
+                                            auto_start: self.auto_start,
+                                            show_timestamp: self.show_timestamp,
                                         },
-                                        environment: HashMap::new(),
-                                        auto_start: self.auto_start,
-                                        show_timestamp: self.show_timestamp,
-                                    },
-                                });
-                                app.next_state = Some(AppStateKind::ServiceList(
-                                    AppStateServiceList::new_at(self.id),
-                                ));
+                                    });
+                                    app.next_state = Some(AppStateKind::ServiceList(
+                                        AppStateServiceList::new_at(self.id),
+                                    ));
+                                }
+                                _ => {}
                             }
-                            _ => {}
+                            return;
                         }
-                        return;
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
+            Event::Mouse(mouse_event) => match mouse_event.kind {
+                MouseEventKind::ScrollUp => {
+                    scroll_cursor(-1);
+                }
+                MouseEventKind::ScrollDown => {
+                    scroll_cursor(1);
+                }
+                _ => {}
+            },
+            _ => (),
         }
         match self.cursor {
             CurrentlyEditing::Name => {

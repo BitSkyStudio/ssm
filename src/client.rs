@@ -11,12 +11,12 @@ use bincode::config::standard;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
 use ratatui::{
     DefaultTerminal, Frame,
-    layout::{Constraint, HorizontalAlignment, Layout},
+    layout::{Constraint, HorizontalAlignment, Layout, Margin},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{
-        Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
-        ScrollbarOrientation, ScrollbarState,
+        Block, Borders, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState,
     },
 };
 
@@ -700,17 +700,27 @@ impl AppState for AppStateUpdateConfig {
         );
 
         if let Some(popup) = &mut self.environment_popup {
-            let popup_block = Block::bordered().title("Set Environment Variable");
-            let centered_area = frame
+            let popup_area = frame
                 .area()
-                .centered(Constraint::Percentage(60), Constraint::Length(7));
-            frame.render_widget(ratatui::widgets::Clear, centered_area);
-            let chunks = Layout::vertical([Constraint::Length(3), Constraint::Length(3)])
-                .split(centered_area);
+                .centered(Constraint::Percentage(60), Constraint::Length(9));
+            /*frame.render_widget(ratatui::widgets::Clear, popup_area);
+            frame.render_widget(
+                Text::raw("").alignment(HorizontalAlignment::Center),
+                popup_area,
+            );*/
+            frame.render_widget(ratatui::widgets::Clear, popup_area);
+            frame.render_widget(Paragraph::new("").block(Block::bordered()), popup_area);
+            let chunks = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(3),
+                Constraint::Length(3),
+            ])
+            .split(popup_area.inner(Margin::new(1, 1)));
+            frame.render_widget(Text::raw("Set Environment Variable").centered(), chunks[0]);
             set_field_active(&mut popup.key, "Key", !popup.selected);
-            frame.render_widget(&popup.key, chunks[0]);
+            frame.render_widget(&popup.key, chunks[1]);
             set_field_active(&mut popup.value, "Value", popup.selected);
-            frame.render_widget(&popup.value, chunks[1]);
+            frame.render_widget(&popup.value, chunks[2]);
         }
 
         false

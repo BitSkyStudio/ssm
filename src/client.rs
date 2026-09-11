@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, hash_map::Entry},
     io, iter,
     os::unix::net::UnixStream,
     process::exit,
@@ -14,7 +14,10 @@ use ratatui::{
     layout::{Constraint, HorizontalAlignment, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{
+        Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
+        ScrollbarOrientation, ScrollbarState,
+    },
 };
 
 use ratatui::style::Stylize;
@@ -235,9 +238,9 @@ impl AppState for AppStateServiceList {
 
         frame.render_widget(
             Paragraph::new(Text::raw(
-                "[S]Start [E]Stop [K]Kill [O]Pause [P]Continue [M]Edit [C]Create [Del]Remove [Enter]Monitor",
+                "[S]Start [D]Stop [K]Kill [O]Pause [P]Continue [E]Edit [C]Create [Del]Remove [Enter]Monitor",
             ))
-            .block(Block::default().borders(Borders::ALL.difference(Borders::BOTTOM))),
+            .block(Block::default().borders(Borders::TOP)),
             chunks[1],
         );
 
@@ -274,7 +277,7 @@ impl AppState for AppStateServiceList {
                             };
                             app.connection.send(NetMessageC2S::StartService(id));
                         }
-                        KeyCode::Char('e') => {
+                        KeyCode::Char('d') => {
                             let Some(id) = self.last_selected_service else {
                                 return;
                             };
@@ -298,7 +301,7 @@ impl AppState for AppStateServiceList {
                             };
                             app.connection.send(NetMessageC2S::UnpauseService(id));
                         }
-                        KeyCode::Char('m') => {
+                        KeyCode::Char('e') => {
                             let Some(id) = self.last_selected_service else {
                                 return;
                             };
@@ -414,7 +417,7 @@ impl AppState for AppStateLogMonitor {
             .unwrap_or(ServiceStatus::Down);
         let paragraph = Paragraph::new(text.clone()).block(
             Block::default()
-                .borders(Borders::ALL)
+                .borders(Borders::BOTTOM)
                 .title(format!("{} - {:?}", service.name, status))
                 .title_alignment(HorizontalAlignment::Center),
         );
@@ -430,7 +433,17 @@ impl AppState for AppStateLogMonitor {
         if self.scroll == max_scroll {
             self.tracking = true;
         }
-        frame.render_widget(paragraph.scroll((self.scroll as u16, 0)), chunks[0]);
+
+        let mut scrollbar_state = ScrollbarState::new(max_scroll)
+            .viewport_content_length(self.last_page_size)
+            .position(self.scroll);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
+        {
+            let chunks =
+                Layout::horizontal([Constraint::Min(0), Constraint::Length(1)]).split(chunks[0]);
+            frame.render_widget(paragraph.scroll((self.scroll as u16, 0)), chunks[0]);
+            frame.render_stateful_widget(scrollbar, chunks[1], &mut scrollbar_state);
+        }
         frame.render_widget(&self.input_box, chunks[1]);
         false
     }
@@ -514,9 +527,17 @@ struct AppStateUpdateConfig {
     executable_field: TextArea<'static>,
     working_directory_field: TextArea<'static>,
     arguments_field: TextArea<'static>,
+    environment: HashMap<String, String>,
     auto_start: bool,
     show_timestamp: bool,
     cursor: CurrentlyEditing,
+    environment_popup: Option<EnvironmentUpdatePopup>,
+}
+#[derive(Default)]
+struct EnvironmentUpdatePopup {
+    key: TextArea<'static>,
+    value: TextArea<'static>,
+    selected: bool,
 }
 #[derive(Copy, Clone, PartialEq)]
 enum CurrentlyEditing {
@@ -529,12 +550,12 @@ enum CurrentlyEditing {
     ShowTimestamp,
     Save,
 }
-static EDIT_ORDER: [CurrentlyEditing; 7] = [
+static EDIT_ORDER: [CurrentlyEditing; 8] = [
     CurrentlyEditing::Name,
     CurrentlyEditing::Executable,
     CurrentlyEditing::WorkingDirectory,
     CurrentlyEditing::Arguments,
-    //CurrentlyEditing::Environment,
+    CurrentlyEditing::Environment,
     CurrentlyEditing::AutoStart,
     CurrentlyEditing::ShowTimestamp,
     CurrentlyEditing::Save,
@@ -550,6 +571,7 @@ impl AppStateUpdateConfig {
             .working_directory_field
             .insert_str(config.working_directory.to_str().unwrap());
         state.arguments_field.insert_str(config.arguments.join(" "));
+        state.environment = config.environment.clone();
         state.auto_start = config.auto_start;
         state.show_timestamp = config.show_timestamp;
         state
@@ -564,6 +586,8 @@ impl AppStateUpdateConfig {
             auto_start: false,
             show_timestamp: true,
             cursor: CurrentlyEditing::Name,
+            environment: HashMap::new(),
+            environment_popup: None,
         }
     }
 }
@@ -622,6 +646,7 @@ impl AppState for AppStateUpdateConfig {
             Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(3),
+            Constraint::Length(2 + self.environment.len() as u16),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(3),
@@ -632,12 +657,26 @@ impl AppState for AppStateUpdateConfig {
         frame.render_widget(&self.working_directory_field, chunks[2]);
         frame.render_widget(&self.arguments_field, chunks[3]);
         frame.render_widget(
+            Paragraph::new({
+                let mut text = Text::default();
+                for (key, value) in &self.environment {
+                    text.push_line(format!("{}={}", key, value));
+                }
+                text
+            })
+            .block(Block::bordered().title(modifier_reverse_if(
+                Line::raw("Environment"),
+                self.cursor == CurrentlyEditing::Environment,
+            ))),
+            chunks[4],
+        );
+        frame.render_widget(
             create_checkbox(
                 "Auto Start",
                 self.cursor == CurrentlyEditing::AutoStart,
                 self.auto_start,
             ),
-            chunks[4],
+            chunks[5],
         );
         frame.render_widget(
             create_checkbox(
@@ -645,7 +684,7 @@ impl AppState for AppStateUpdateConfig {
                 self.cursor == CurrentlyEditing::ShowTimestamp,
                 self.show_timestamp,
             ),
-            chunks[5],
+            chunks[6],
         );
         frame.render_widget(
             Paragraph::new(modifier_reverse_if(
@@ -654,15 +693,75 @@ impl AppState for AppStateUpdateConfig {
             ))
             .block(Block::bordered()),
             {
-                let mut area = chunks[6];
+                let mut area = chunks[7];
                 area.width = 8;
                 area
             },
         );
 
+        if let Some(popup) = &mut self.environment_popup {
+            let popup_block = Block::bordered().title("Set Environment Variable");
+            let centered_area = frame
+                .area()
+                .centered(Constraint::Percentage(60), Constraint::Length(7));
+            frame.render_widget(ratatui::widgets::Clear, centered_area);
+            let chunks = Layout::vertical([Constraint::Length(3), Constraint::Length(3)])
+                .split(centered_area);
+            set_field_active(&mut popup.key, "Key", !popup.selected);
+            frame.render_widget(&popup.key, chunks[0]);
+            set_field_active(&mut popup.value, "Value", popup.selected);
+            frame.render_widget(&popup.value, chunks[1]);
+        }
+
         false
     }
     fn handle_event(&mut self, app: &mut AppRef, event: &Event) {
+        if let Some(popup) = &mut self.environment_popup {
+            if let Event::Key(key_event) = event {
+                if key_event.is_press() {
+                    match key_event.code {
+                        KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::BackTab => {
+                            popup.selected ^= true;
+                            return;
+                        }
+                        KeyCode::Esc => {
+                            self.environment_popup = None;
+                            return;
+                        }
+                        KeyCode::Enter => {
+                            let key = read_field(&popup.key);
+                            let value = read_field(&popup.value);
+                            if !key.is_empty() {
+                                match self.environment.entry(key) {
+                                    Entry::Occupied(mut entry) => {
+                                        if value.is_empty() {
+                                            entry.remove();
+                                        } else {
+                                            entry.insert(value);
+                                        }
+                                    }
+                                    Entry::Vacant(entry) => {
+                                        if !value.is_empty() {
+                                            entry.insert(value);
+                                        }
+                                    }
+                                }
+                                self.environment_popup = None;
+                            }
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if !popup.selected {
+                popup.key.input(event.clone());
+            } else {
+                popup.value.input(event.clone());
+            }
+            return;
+        }
+
         let mut scroll_cursor = |scroll: isize| {
             let mut current_index =
                 EDIT_ORDER.iter().position(|e| *e == self.cursor).unwrap() as isize;
@@ -675,11 +774,11 @@ impl AppState for AppStateUpdateConfig {
             Event::Key(key_event) => {
                 if key_event.is_press() {
                     match key_event.code {
-                        KeyCode::Down => {
+                        KeyCode::Down | KeyCode::Tab => {
                             scroll_cursor(1);
                             return;
                         }
-                        KeyCode::Up => {
+                        KeyCode::Up | KeyCode::BackTab => {
                             scroll_cursor(-1);
                             return;
                         }
@@ -691,6 +790,10 @@ impl AppState for AppStateUpdateConfig {
                         }
                         KeyCode::Enter => {
                             match self.cursor {
+                                CurrentlyEditing::Environment => {
+                                    self.environment_popup =
+                                        Some(EnvironmentUpdatePopup::default());
+                                }
                                 CurrentlyEditing::AutoStart => {
                                     self.auto_start ^= true;
                                 }
@@ -698,9 +801,6 @@ impl AppState for AppStateUpdateConfig {
                                     self.show_timestamp ^= true;
                                 }
                                 CurrentlyEditing::Save => {
-                                    fn read_field(field: &TextArea) -> String {
-                                        field.lines().join("\n")
-                                    }
                                     let arguments = read_field(&self.arguments_field);
                                     app.connection.send(NetMessageC2S::UpdateServiceConfig {
                                         id: self.id,
@@ -719,7 +819,7 @@ impl AppState for AppStateUpdateConfig {
                                                     .map(|str| str.to_string())
                                                     .collect()
                                             },
-                                            environment: HashMap::new(),
+                                            environment: self.environment.clone(),
                                             auto_start: self.auto_start,
                                             show_timestamp: self.show_timestamp,
                                         },
@@ -760,9 +860,11 @@ impl AppState for AppStateUpdateConfig {
             CurrentlyEditing::Arguments => {
                 self.arguments_field.input(event.clone());
             }
-            CurrentlyEditing::Environment => {}
             _ => {}
         }
     }
     fn handle_message(&mut self, _app: &mut AppRef, _message: &NetMessageS2C) {}
+}
+fn read_field(field: &TextArea) -> String {
+    field.lines().join("\n")
 }

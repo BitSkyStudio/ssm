@@ -16,7 +16,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{
         Block, Borders, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
-        ScrollbarState,
+        ScrollbarState, Wrap,
     },
 };
 
@@ -45,6 +45,7 @@ impl ServerConnection {
 enum AppMessage {
     Net(NetMessageS2C),
     TermEvent(Event),
+    Disconnect,
 }
 struct App {
     connection: ServerConnection,
@@ -69,7 +70,8 @@ impl App {
                         tx2.send(AppMessage::Net(message)).unwrap();
                     }
                     Err(_) => {
-                        panic!("connection closed");
+                        tx2.send(AppMessage::Disconnect).unwrap();
+                        break;
                     }
                 }
             }
@@ -143,6 +145,9 @@ impl App {
                                 self.exit = true;
                             }
                         }
+                    }
+                    AppMessage::Disconnect => {
+                        self.exit = true;
                     }
                 }
             }
@@ -415,12 +420,14 @@ impl AppState for AppStateLogMonitor {
             .get(&self.service)
             .cloned()
             .unwrap_or(ServiceStatus::Down);
-        let paragraph = Paragraph::new(text.clone()).block(
-            Block::default()
-                .borders(Borders::BOTTOM)
-                .title(format!("{} - {:?}", service.name, status))
-                .title_alignment(HorizontalAlignment::Center),
-        );
+        let paragraph = Paragraph::new(text.clone())
+            .block(
+                Block::default()
+                    .borders(Borders::BOTTOM)
+                    .title(format!("{} - {:?}", service.name, status))
+                    .title_alignment(HorizontalAlignment::Center),
+            )
+            .wrap(Wrap { trim: false });
         let chunks =
             Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(frame.area());
         self.last_page_size = chunks[0].height as usize;

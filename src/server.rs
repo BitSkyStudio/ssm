@@ -315,7 +315,7 @@ impl Service {
             Err(error) => {
                 self.logs.push(LogEntry {
                     kind: LogKind::Err,
-                    text: format!("{:?}", error),
+                    text: format!("{}", error),
                     time: SystemTime::now(),
                 });
                 self.status = ServiceStatus::Miscarried;
@@ -330,9 +330,12 @@ struct ServiceProcess {
 }
 impl ServiceProcess {
     fn start(id: Uuid, config: &ServiceConfig, tx: ServerTx) -> io::Result<ServiceProcess> {
-        /*if !std::fs::exists(&config.executable) || !std::fs::exists(&config.working_directory) {
-            println!("invalid config");
-        }*/
+        if !std::fs::exists(&config.executable).unwrap_or(false) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "executable not found",
+            ));
+        }
         let mut command = Command::new(&config.executable);
         command
             .current_dir(&config.working_directory)

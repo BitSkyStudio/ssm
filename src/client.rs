@@ -181,10 +181,14 @@ impl AppStateKind {
         }
     }
 }
+struct ListDeleteDialog {
+    service: Uuid,
+}
 struct AppStateServiceList {
     list_state: ListState,
     last_selected_service: Option<Uuid>,
     next_select_service: Option<Uuid>,
+    delete_popup: Option<ListDeleteDialog>,
 }
 impl AppStateServiceList {
     fn new() -> AppStateServiceList {
@@ -192,6 +196,7 @@ impl AppStateServiceList {
             list_state: ListState::default().with_selected(Some(0)),
             last_selected_service: None,
             next_select_service: None,
+            delete_popup: None,
         }
     }
     fn new_at(selected: Uuid) -> AppStateServiceList {
@@ -199,6 +204,7 @@ impl AppStateServiceList {
             list_state: ListState::default().with_selected(Some(0)),
             last_selected_service: None,
             next_select_service: Some(selected),
+            delete_popup: None,
         }
     }
 }
@@ -253,9 +259,51 @@ impl AppState for AppStateServiceList {
             Some(selected) => service_list.get(selected).cloned(),
             None => None,
         };
+
+        if let Some(popup) = &mut self.delete_popup {
+            let Some(delete_service) = app.services.get(&popup.service) else {
+                self.delete_popup = None;
+                return true;
+            };
+            let popup_area = frame
+                .area()
+                .centered_horizontally(Constraint::Percentage(60));
+
+            let mut text = Text::default();
+            text.push_span(Span::raw(&delete_service.name).bold());
+            text.push_span("?");
+            text.push_line("[Enter]Yes [Esc]No");
+            let paragraph = Paragraph::new(text)
+                .block(Block::bordered().title("Do you want to delete"))
+                .wrap(Wrap { trim: true });
+            let popup_area = popup_area.centered_vertically(Constraint::Length(
+                paragraph.line_count(popup_area.width) as u16,
+            ));
+            frame.render_widget(ratatui::widgets::Clear, popup_area);
+            frame.render_widget(&paragraph, popup_area);
+        }
+
         false
     }
     fn handle_event(&mut self, app: &mut AppRef, event: &Event) {
+        if let Some(delete_dialog) = &mut self.delete_popup {
+            if let Event::Key(key_event) = event {
+                if key_event.is_press() {
+                    match key_event.code {
+                        KeyCode::Esc => {
+                            self.delete_popup = None;
+                        }
+                        KeyCode::Enter => {
+                            app.connection
+                                .send(NetMessageC2S::RemoveService(delete_dialog.service));
+                            self.delete_popup = None;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            return;
+        }
         match event {
             Event::Key(key_event) => {
                 if key_event.is_press() {
@@ -326,8 +374,7 @@ impl AppState for AppStateServiceList {
                             let Some(id) = self.last_selected_service else {
                                 return;
                             };
-                            //todo: confirm dialog
-                            app.connection.send(NetMessageC2S::RemoveService(id));
+                            self.delete_popup = Some(ListDeleteDialog { service: id });
                         }
                         _ => {}
                     }
@@ -598,18 +645,18 @@ impl AppStateUpdateConfig {
         }
     }
 }
+fn modifier_reverse_if<'a, T>(element: T, should: bool) -> T
+where
+    T: Stylize<'a, T>,
+{
+    if should {
+        element.add_modifier(Modifier::REVERSED)
+    } else {
+        element
+    }
+}
 impl AppState for AppStateUpdateConfig {
     fn render(&mut self, _app: &mut AppRef, frame: &mut Frame) -> bool {
-        fn modifier_reverse_if<'a, T>(element: T, should: bool) -> T
-        where
-            T: Stylize<'a, T>,
-        {
-            if should {
-                element.add_modifier(Modifier::REVERSED)
-            } else {
-                element
-            }
-        }
         fn set_field_active(field: &mut TextArea, name: &'static str, active: bool) {
             field.set_block(
                 Block::default()

@@ -302,7 +302,7 @@ impl Service {
     }
     pub fn try_start(&mut self, tx: ServerTx) {
         match self.status {
-            ServiceStatus::Running | ServiceStatus::Stopping => return,
+            ServiceStatus::Running | ServiceStatus::Stopping | ServiceStatus::Paused => return,
             _ => {}
         }
         self.stopping = false;
